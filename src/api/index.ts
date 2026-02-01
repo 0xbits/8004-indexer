@@ -67,12 +67,6 @@ const openApiSpec = {
     { url: "http://localhost:42069", description: "Development" },
   ],
   paths: {
-    "/health": {
-      get: {
-        summary: "Health check",
-        responses: { "200": { description: "OK" } },
-      },
-    },
     "/stats": {
       get: {
         summary: "Get registry statistics",
@@ -154,11 +148,6 @@ app.get("/docs", swaggerUI({ url: "/openapi.json" }));
 // ============================================
 // REST ENDPOINTS
 // ============================================
-
-// Health check
-app.get("/health", (c) => {
-  return c.json({ status: "ok", timestamp: new Date().toISOString() });
-});
 
 // Stats
 app.get("/stats", async (c) => {
