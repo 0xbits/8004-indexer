@@ -1,4 +1,4 @@
-import { createConfig } from "ponder";
+import { createConfig, rateLimit } from "ponder";
 import { http } from "viem";
 
 import { IdentityRegistryAbi } from "./abis/IdentityRegistry";
@@ -36,7 +36,10 @@ export default createConfig({
   chains: {
     mainnet: {
       id: 1,
-      rpc: http(process.env.PONDER_RPC_URL_1 ?? "https://eth.drpc.org"),
+      // Rate limit to 20 req/s (Alchemy's limit)
+      rpc: rateLimit(http(process.env.PONDER_RPC_URL_1 ?? "https://eth.drpc.org"), {
+        requestsPerSecond: 20,
+      }),
     },
     sepolia: {
       id: 11155111,
