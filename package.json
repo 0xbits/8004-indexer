@@ -1,6 +1,12 @@
 {
-  "name": "erc8004-indexer",
-  "version": "0.0.1",
+  "name": "8004-indexer",
+  "version": "0.1.0",
+  "description": "Ponder indexer for ERC-8004 Trustless Agents",
+  "author": "Bits <bitsthefamiliar@proton.me>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0xbits/8004-indexer"
+  },
   "private": true,
   "type": "module",
   "scripts": {
