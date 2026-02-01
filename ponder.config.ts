@@ -17,25 +17,24 @@ const START_BLOCK = 0;
 
 export default createConfig({
   database: {
-    kind: "postgres",
-    connectionString: process.env.DATABASE_URL,
+    kind: "pglite",
   },
   
-  networks: {
+  chains: {
     // Ethereum Mainnet
     mainnet: {
-      chainId: 1,
-      transport: http(process.env.PONDER_RPC_URL_1 ?? "https://eth.llamarpc.com"),
+      id: 1,
+      rpc: http(process.env.PONDER_RPC_URL_1 ?? "https://eth.llamarpc.com"),
     },
     // Base (common L2 for agents)
     base: {
-      chainId: 8453,
-      transport: http(process.env.PONDER_RPC_URL_8453 ?? "https://mainnet.base.org"),
+      id: 8453,
+      rpc: http(process.env.PONDER_RPC_URL_8453 ?? "https://mainnet.base.org"),
     },
     // Sepolia testnet
     sepolia: {
-      chainId: 11155111,
-      transport: http(process.env.PONDER_RPC_URL_11155111 ?? "https://ethereum-sepolia.publicnode.com"),
+      id: 11155111,
+      rpc: http(process.env.PONDER_RPC_URL_11155111 ?? "https://ethereum-sepolia.publicnode.com"),
     },
   },
   
@@ -43,7 +42,7 @@ export default createConfig({
     // Identity Registry - ERC-721 based agent registration
     IdentityRegistry: {
       abi: IdentityRegistryAbi,
-      network: "mainnet", // Change to deployment network
+      chain: "mainnet", // Change to deployment network
       address: IDENTITY_REGISTRY_ADDRESS,
       startBlock: START_BLOCK,
     },
@@ -51,7 +50,7 @@ export default createConfig({
     // Reputation Registry - Feedback system
     ReputationRegistry: {
       abi: ReputationRegistryAbi,
-      network: "mainnet", // Change to deployment network
+      chain: "mainnet", // Change to deployment network
       address: REPUTATION_REGISTRY_ADDRESS,
       startBlock: START_BLOCK,
     },
