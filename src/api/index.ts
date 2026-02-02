@@ -376,6 +376,45 @@ app.get("/top", async (c) => {
 });
 
 // ============================================
+// ENRICHMENT STATUS
+// ============================================
+
+// Get enrichment status
+app.get("/enrichment/status", async (c) => {
+  try {
+    const [total] = await db
+      .select({ count: count() })
+      .from(schema.agent)
+      .where(sql`${schema.agent.agentURI} IS NOT NULL`);
+    
+    const [enriched] = await db
+      .select({ count: count() })
+      .from(schema.agent)
+      .where(sql`${schema.agent.metadataFetchedAt} IS NOT NULL`);
+    
+    const [withName] = await db
+      .select({ count: count() })
+      .from(schema.agent)
+      .where(sql`${schema.agent.name} IS NOT NULL`);
+    
+    const [failed] = await db
+      .select({ count: count() })
+      .from(schema.agent)
+      .where(sql`${schema.agent.metadataError} IS NOT NULL`);
+    
+    return c.json({
+      total: total?.count || 0,
+      enriched: enriched?.count || 0,
+      withName: withName?.count || 0,
+      failed: failed?.count || 0,
+      pending: (total?.count || 0) - (enriched?.count || 0),
+    });
+  } catch (error) {
+    return c.json({ error: "Failed to get enrichment status" }, 500);
+  }
+});
+
+// ============================================
 // GRAPHQL
 // ============================================
 
