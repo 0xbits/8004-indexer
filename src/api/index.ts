@@ -506,12 +506,6 @@ app.get("/agents/:id", async (c) => {
       .from(schema.agentService)
       .where(eq(schema.agentService.agentId, BigInt(id)));
     
-    // Get metadata
-    const metadata = await db
-      .select()
-      .from(schema.agentMetadata)
-      .where(eq(schema.agentMetadata.agentId, BigInt(id)));
-    
     return c.json({
       ...formatAgent(agent),
       services: services.map((s) => ({
@@ -523,10 +517,6 @@ app.get("/agents/:id", async (c) => {
         tools: parseJsonArray(s.tools),
         skills: parseJsonArray(s.skills),
       })),
-      metadata: metadata.reduce((acc, m) => {
-        acc[m.metadataKey] = m.metadataValue;
-        return acc;
-      }, {} as Record<string, string>),
     });
   } catch (error) {
     return c.json({ error: "Failed to fetch agent" }, 500);
