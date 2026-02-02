@@ -13,12 +13,23 @@ export const agent = onchainTable("agent", (t) => ({
   registeredBlock: t.bigint().notNull(),
   registeredTxHash: t.hex().notNull(),
   updatedAt: t.bigint(),
+  // Metadata from URI (enriched by worker)
   name: t.text(),
   description: t.text(),
   image: t.text(),
   active: t.boolean(),
+  x402Support: t.boolean(),
+  // Aggregated from services
+  hasMCP: t.boolean(),
+  hasA2A: t.boolean(),
+  mcpTools: t.text(), // JSON array as text
+  a2aSkills: t.text(), // JSON array as text
+  // Feedback stats
   feedbackCount: t.integer().notNull().default(0),
   avgRating: t.real(),
+  // Enrichment tracking
+  metadataFetchedAt: t.bigint(),
+  metadataError: t.text(),
 }));
 
 // ============================================

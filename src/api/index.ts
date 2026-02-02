@@ -158,11 +158,31 @@ app.get("/stats", async (c) => {
       .select({ count: count() })
       .from(schema.agent)
       .where(sql`${schema.agent.agentURI} IS NOT NULL AND ${schema.agent.agentURI} != ''`);
+    const [withMetadataCount] = await db
+      .select({ count: count() })
+      .from(schema.agent)
+      .where(sql`${schema.agent.metadataFetchedAt} IS NOT NULL AND ${schema.agent.name} IS NOT NULL`);
+    const [withMCPCount] = await db
+      .select({ count: count() })
+      .from(schema.agent)
+      .where(sql`${schema.agent.hasMCP} = true`);
+    const [withA2ACount] = await db
+      .select({ count: count() })
+      .from(schema.agent)
+      .where(sql`${schema.agent.hasA2A} = true`);
+    const [withX402Count] = await db
+      .select({ count: count() })
+      .from(schema.agent)
+      .where(sql`${schema.agent.x402Support} = true`);
     
     return c.json({
       totalAgents: agentCount?.count || 0,
       totalFeedback: feedbackCount?.count || 0,
       agentsWithURI: withUriCount?.count || 0,
+      agentsWithMetadata: withMetadataCount?.count || 0,
+      agentsWithMCP: withMCPCount?.count || 0,
+      agentsWithA2A: withA2ACount?.count || 0,
+      agentsWithX402: withX402Count?.count || 0,
     });
   } catch (error) {
     return c.json({ error: "Failed to fetch stats" }, 500);
@@ -175,6 +195,10 @@ app.get("/search", async (c) => {
   const limit = Math.min(parseInt(c.req.query("limit") || "20"), 100);
   const offset = parseInt(c.req.query("offset") || "0");
   const sort = c.req.query("sort") || "feedback";
+  const hasMCP = c.req.query("mcp") === "true";
+  const hasA2A = c.req.query("a2a") === "true";
+  const hasX402 = c.req.query("x402") === "true";
+  const hasMetadata = c.req.query("metadata") === "true";
   
   try {
     let orderBy;
@@ -190,19 +214,33 @@ app.get("/search", async (c) => {
         orderBy = desc(schema.agent.feedbackCount);
     }
     
-    let agents;
+    // Build filter conditions
+    const conditions = [];
+    
     if (query) {
       const searchPattern = `%${query.toLowerCase()}%`;
+      conditions.push(
+        or(
+          sql`LOWER(${schema.agent.name}) LIKE ${searchPattern}`,
+          sql`LOWER(${schema.agent.description}) LIKE ${searchPattern}`,
+          sql`LOWER(${schema.agent.mcpTools}) LIKE ${searchPattern}`,
+          sql`LOWER(${schema.agent.a2aSkills}) LIKE ${searchPattern}`,
+          sql`LOWER(${schema.agent.agentURI}) LIKE ${searchPattern}`
+        )
+      );
+    }
+    
+    if (hasMCP) conditions.push(sql`${schema.agent.hasMCP} = true`);
+    if (hasA2A) conditions.push(sql`${schema.agent.hasA2A} = true`);
+    if (hasX402) conditions.push(sql`${schema.agent.x402Support} = true`);
+    if (hasMetadata) conditions.push(sql`${schema.agent.name} IS NOT NULL`);
+    
+    let agents;
+    if (conditions.length > 0) {
       agents = await db
         .select()
         .from(schema.agent)
-        .where(
-          or(
-            sql`LOWER(${schema.agent.name}) LIKE ${searchPattern}`,
-            sql`LOWER(${schema.agent.description}) LIKE ${searchPattern}`,
-            sql`LOWER(${schema.agent.agentURI}) LIKE ${searchPattern}`
-          )
-        )
+        .where(sql.join(conditions, sql` AND `))
         .orderBy(orderBy)
         .limit(limit)
         .offset(offset);
@@ -357,10 +395,16 @@ function formatAgent(agent: typeof schema.agent.$inferSelect) {
     description: agent.description,
     image: agent.image,
     active: agent.active,
+    x402Support: agent.x402Support,
+    hasMCP: agent.hasMCP,
+    hasA2A: agent.hasA2A,
+    mcpTools: agent.mcpTools ? JSON.parse(agent.mcpTools) : null,
+    a2aSkills: agent.a2aSkills ? JSON.parse(agent.a2aSkills) : null,
     feedbackCount: agent.feedbackCount,
     avgRating: agent.avgRating,
     registeredAt: agent.registeredAt.toString(),
     registeredBlock: agent.registeredBlock.toString(),
+    metadataFetched: agent.metadataFetchedAt != null,
   };
 }
 
