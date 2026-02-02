@@ -14,13 +14,59 @@ interface ParsedMetadata {
   name?: string;
   description?: string;
   image?: string;
+  externalUrl?: string;
   active?: boolean;
   x402Support?: boolean;
+  tags?: string[];
+  protocols?: string[];
+  chain?: string;
+  chainId?: number;
+  supportedTrust?: string[];
+  mcpCapabilities?: string[];
   hasMCP?: boolean;
   hasA2A?: boolean;
   mcpTools?: string[];
   a2aSkills?: string[];
-  services?: { name: string; endpoint: string; version?: string }[];
+  metadataUpdatedAt?: bigint;
+  services?: {
+    name: string;
+    endpoint: string;
+    version?: string;
+    description?: string;
+    capabilities?: string[];
+    tools?: string[];
+    skills?: string[];
+  }[];
+}
+
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+  return items.length > 0 ? items : undefined;
+}
+
+function parseMetadataUpdatedAt(value: unknown): bigint | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const seconds = value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
+    return BigInt(seconds);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const asNumber = Number(trimmed);
+    if (Number.isFinite(asNumber)) {
+      const seconds = asNumber > 1e12 ? Math.floor(asNumber / 1000) : Math.floor(asNumber);
+      return BigInt(seconds);
+    }
+    const parsed = Date.parse(trimmed);
+    if (!Number.isNaN(parsed)) {
+      return BigInt(Math.floor(parsed / 1000));
+    }
+  }
+  return undefined;
 }
 
 async function fetchAndParseURI(uri: string | null): Promise<ParsedMetadata | null> {
@@ -69,25 +115,56 @@ async function fetchAndParseURI(uri: string | null): Promise<ParsedMetadata | nu
     
     const mcpTools: string[] = [];
     const a2aSkills: string[] = [];
+    const mcpCapabilities: string[] = [];
     for (const svc of services) {
-      if (Array.isArray(svc.mcpTools)) mcpTools.push(...svc.mcpTools);
+      if (Array.isArray(svc.tools)) mcpTools.push(...svc.tools);
       if (Array.isArray(svc.a2aSkills)) a2aSkills.push(...svc.a2aSkills);
+      if (Array.isArray(svc.skills)) a2aSkills.push(...svc.skills);
+      if (Array.isArray(svc.capabilities)) mcpCapabilities.push(...svc.capabilities);
     }
     
+    const tags = normalizeStringArray(data?.attributes?.tags);
+    const protocols = normalizeStringArray(data?.attributes?.protocols);
+    const supportedTrust = normalizeStringArray(data?.supportedTrust);
+    const metadataUpdatedAt = parseMetadataUpdatedAt(
+      data?.updatedAt ?? data?.updated_at ?? data?.metadataUpdatedAt
+    );
+    const chain = typeof data?.attributes?.blockchain?.chain === "string"
+      ? data.attributes.blockchain.chain
+      : undefined;
+    const chainId =
+      typeof data?.attributes?.blockchain?.chainId === "number"
+        ? data.attributes.blockchain.chainId
+        : typeof data?.attributes?.blockchain?.chainId === "string"
+          ? Number(data.attributes.blockchain.chainId)
+          : undefined;
+
     return {
       name: typeof data.name === "string" ? data.name.slice(0, 500) : undefined,
       description: typeof data.description === "string" ? data.description.slice(0, 2000) : undefined,
       image: typeof data.image === "string" ? data.image.slice(0, 500) : undefined,
+      externalUrl: typeof data.external_url === "string" ? data.external_url.slice(0, 500) : undefined,
       active: typeof data.active === "boolean" ? data.active : undefined,
       x402Support: data.x402Support === true || data.x402support === true,
+      tags,
+      protocols,
+      chain: chain ? chain.slice(0, 100) : undefined,
+      chainId: Number.isFinite(chainId) ? chainId : undefined,
+      supportedTrust,
+      mcpCapabilities: mcpCapabilities.length > 0 ? mcpCapabilities : undefined,
       hasMCP,
       hasA2A,
       mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
       a2aSkills: a2aSkills.length > 0 ? a2aSkills : undefined,
+      metadataUpdatedAt,
       services: services.map((s: any) => ({
         name: s.name || "unknown",
         endpoint: s.endpoint || "",
         version: s.version,
+        description: typeof s.description === "string" ? s.description.slice(0, 1000) : undefined,
+        capabilities: normalizeStringArray(s.capabilities),
+        tools: normalizeStringArray(s.tools),
+        skills: normalizeStringArray(s.a2aSkills ?? s.skills),
       })),
     };
   } catch (e) {
@@ -121,13 +198,21 @@ ponder.on("IdentityRegistry:Registered", async ({ event, context }) => {
     name: metadata?.name || null,
     description: metadata?.description || null,
     image: metadata?.image || null,
+    externalUrl: metadata?.externalUrl || null,
     active: metadata?.active ?? null,
     x402Support: metadata?.x402Support ?? false,
+    tags: metadata?.tags ? JSON.stringify(metadata.tags) : null,
+    protocols: metadata?.protocols ? JSON.stringify(metadata.protocols) : null,
+    chain: metadata?.chain || null,
+    chainId: metadata?.chainId ?? null,
+    supportedTrust: metadata?.supportedTrust ? JSON.stringify(metadata.supportedTrust) : null,
+    mcpCapabilities: metadata?.mcpCapabilities ? JSON.stringify(metadata.mcpCapabilities) : null,
     hasMCP: metadata?.hasMCP ?? false,
     hasA2A: metadata?.hasA2A ?? false,
     mcpTools: metadata?.mcpTools ? JSON.stringify(metadata.mcpTools) : null,
     a2aSkills: metadata?.a2aSkills ? JSON.stringify(metadata.a2aSkills) : null,
     metadataFetchedAt: metadata ? event.block.timestamp : null,
+    metadataUpdatedAt: metadata?.metadataUpdatedAt ?? null,
   });
   
   // Insert services
@@ -138,6 +223,10 @@ ponder.on("IdentityRegistry:Registered", async ({ event, context }) => {
         serviceName: svc.name,
         endpoint: svc.endpoint,
         version: svc.version || null,
+        description: svc.description || null,
+        capabilities: svc.capabilities ? JSON.stringify(svc.capabilities) : null,
+        tools: svc.tools ? JSON.stringify(svc.tools) : null,
+        skills: svc.skills ? JSON.stringify(svc.skills) : null,
       }).onConflictDoNothing();
     }
   }
@@ -197,13 +286,21 @@ ponder.on("IdentityRegistry:URIUpdated", async ({ event, context }) => {
       name: metadata?.name || null,
       description: metadata?.description || null,
       image: metadata?.image || null,
+      externalUrl: metadata?.externalUrl || null,
       active: metadata?.active ?? null,
       x402Support: metadata?.x402Support ?? false,
+      tags: metadata?.tags ? JSON.stringify(metadata.tags) : null,
+      protocols: metadata?.protocols ? JSON.stringify(metadata.protocols) : null,
+      chain: metadata?.chain || null,
+      chainId: metadata?.chainId ?? null,
+      supportedTrust: metadata?.supportedTrust ? JSON.stringify(metadata.supportedTrust) : null,
+      mcpCapabilities: metadata?.mcpCapabilities ? JSON.stringify(metadata.mcpCapabilities) : null,
       hasMCP: metadata?.hasMCP ?? false,
       hasA2A: metadata?.hasA2A ?? false,
       mcpTools: metadata?.mcpTools ? JSON.stringify(metadata.mcpTools) : null,
       a2aSkills: metadata?.a2aSkills ? JSON.stringify(metadata.a2aSkills) : null,
       metadataFetchedAt: metadata ? event.block.timestamp : null,
+      metadataUpdatedAt: metadata?.metadataUpdatedAt ?? null,
       metadataError: null,
     });
   
@@ -216,9 +313,17 @@ ponder.on("IdentityRegistry:URIUpdated", async ({ event, context }) => {
         serviceName: svc.name,
         endpoint: svc.endpoint,
         version: svc.version || null,
+        description: svc.description || null,
+        capabilities: svc.capabilities ? JSON.stringify(svc.capabilities) : null,
+        tools: svc.tools ? JSON.stringify(svc.tools) : null,
+        skills: svc.skills ? JSON.stringify(svc.skills) : null,
       }).onConflictDoUpdate({
         endpoint: svc.endpoint,
         version: svc.version || null,
+        description: svc.description || null,
+        capabilities: svc.capabilities ? JSON.stringify(svc.capabilities) : null,
+        tools: svc.tools ? JSON.stringify(svc.tools) : null,
+        skills: svc.skills ? JSON.stringify(svc.skills) : null,
       });
     }
   }

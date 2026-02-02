@@ -14,18 +14,56 @@ interface AgentMetadataResult {
   name?: string;
   description?: string;
   image?: string;
+  externalUrl?: string;
   active?: boolean;
   x402Support?: boolean;
+  tags?: string[];
+  protocols?: string[];
+  chain?: string;
+  chainId?: number;
+  supportedTrust?: string[];
+  mcpCapabilities?: string[];
   hasMCP?: boolean;
   hasA2A?: boolean;
   mcpTools?: string[];
   a2aSkills?: string[];
+  metadataUpdatedAt?: bigint;
 }
 
 const IPFS_GATEWAYS = [
   "https://ipfs.io/ipfs/",
   "https://cloudflare-ipfs.com/ipfs/",
 ];
+
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+  return items.length > 0 ? items : undefined;
+}
+
+function parseMetadataUpdatedAt(value: unknown): bigint | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const seconds = value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
+    return BigInt(seconds);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const asNumber = Number(trimmed);
+    if (Number.isFinite(asNumber)) {
+      const seconds = asNumber > 1e12 ? Math.floor(asNumber / 1000) : Math.floor(asNumber);
+      return BigInt(seconds);
+    }
+    const parsed = Date.parse(trimmed);
+    if (!Number.isNaN(parsed)) {
+      return BigInt(Math.floor(parsed / 1000));
+    }
+  }
+  return undefined;
+}
 
 async function fetchAndParseMetadata(uri: string): Promise<AgentMetadataResult | null> {
   try {
@@ -76,21 +114,48 @@ async function fetchAndParseMetadata(uri: string): Promise<AgentMetadataResult |
     
     const mcpTools: string[] = [];
     const a2aSkills: string[] = [];
+    const mcpCapabilities: string[] = [];
     for (const svc of services) {
-      if (Array.isArray(svc.mcpTools)) mcpTools.push(...svc.mcpTools);
+      if (Array.isArray(svc.tools)) mcpTools.push(...svc.tools);
       if (Array.isArray(svc.a2aSkills)) a2aSkills.push(...svc.a2aSkills);
+      if (Array.isArray(svc.skills)) a2aSkills.push(...svc.skills);
+      if (Array.isArray(svc.capabilities)) mcpCapabilities.push(...svc.capabilities);
     }
     
+    const tags = normalizeStringArray(data?.attributes?.tags);
+    const protocols = normalizeStringArray(data?.attributes?.protocols);
+    const supportedTrust = normalizeStringArray(data?.supportedTrust);
+    const metadataUpdatedAt = parseMetadataUpdatedAt(
+      data?.updatedAt ?? data?.updated_at ?? data?.metadataUpdatedAt
+    );
+    const chain = typeof data?.attributes?.blockchain?.chain === "string"
+      ? data.attributes.blockchain.chain
+      : undefined;
+    const chainId =
+      typeof data?.attributes?.blockchain?.chainId === "number"
+        ? data.attributes.blockchain.chainId
+        : typeof data?.attributes?.blockchain?.chainId === "string"
+          ? Number(data.attributes.blockchain.chainId)
+          : undefined;
+
     return {
       name: typeof data.name === "string" ? data.name : undefined,
       description: typeof data.description === "string" ? data.description : undefined,
       image: typeof data.image === "string" ? data.image : undefined,
+      externalUrl: typeof data.external_url === "string" ? data.external_url : undefined,
       active: typeof data.active === "boolean" ? data.active : undefined,
       x402Support: data.x402Support === true || data.x402support === true,
+      tags,
+      protocols,
+      chain: chain ? chain.slice(0, 100) : undefined,
+      chainId: Number.isFinite(chainId) ? chainId : undefined,
+      supportedTrust,
+      mcpCapabilities: mcpCapabilities.length > 0 ? mcpCapabilities : undefined,
       hasMCP,
       hasA2A,
       mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
       a2aSkills: a2aSkills.length > 0 ? a2aSkills : undefined,
+      metadataUpdatedAt,
     };
   } catch {
     return null;
@@ -172,6 +237,9 @@ const openApiSpec = {
                     totalAgents: { type: "integer" },
                     totalFeedback: { type: "integer" },
                     agentsWithURI: { type: "integer" },
+                    chainBreakdown: { type: "object" },
+                    topTags: { type: "array", items: { type: "object" } },
+                    topProtocols: { type: "array", items: { type: "object" } },
                   },
                 },
               },
@@ -185,6 +253,9 @@ const openApiSpec = {
         summary: "Search agents",
         parameters: [
           { name: "q", in: "query", schema: { type: "string" }, description: "Search query" },
+          { name: "chain", in: "query", schema: { type: "string" }, description: "Filter by chain" },
+          { name: "tag", in: "query", schema: { type: "string" }, description: "Filter by tag" },
+          { name: "protocol", in: "query", schema: { type: "string" }, description: "Filter by protocol" },
           { name: "limit", in: "query", schema: { type: "integer", default: 20 } },
           { name: "offset", in: "query", schema: { type: "integer", default: 0 } },
           { name: "sort", in: "query", schema: { type: "string", enum: ["rating", "feedback", "recent"] } },
@@ -265,6 +336,49 @@ app.get("/stats", async (c) => {
       .select({ count: count() })
       .from(schema.agent)
       .where(sql`${schema.agent.x402Support} = true`);
+
+    const agentsForStats = await db
+      .select({ chain: schema.agent.chain, tags: schema.agent.tags, protocols: schema.agent.protocols })
+      .from(schema.agent);
+
+    const chainCounts = new Map<string, number>();
+    const tagCounts = new Map<string, number>();
+    const protocolCounts = new Map<string, number>();
+
+    for (const row of agentsForStats) {
+      if (row.chain && row.chain.trim()) {
+        const key = row.chain.trim().toLowerCase();
+        chainCounts.set(key, (chainCounts.get(key) || 0) + 1);
+      }
+
+      const tags = parseJsonArray(row.tags);
+      if (tags) {
+        for (const tag of tags) {
+          const key = tag.trim().toLowerCase();
+          if (!key) continue;
+          tagCounts.set(key, (tagCounts.get(key) || 0) + 1);
+        }
+      }
+
+      const protocols = parseJsonArray(row.protocols);
+      if (protocols) {
+        for (const protocol of protocols) {
+          const key = protocol.trim().toLowerCase();
+          if (!key) continue;
+          protocolCounts.set(key, (protocolCounts.get(key) || 0) + 1);
+        }
+      }
+    }
+
+    const chainBreakdown = Object.fromEntries(chainCounts.entries());
+    const topTags = [...tagCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([tag, count]) => ({ tag, count }));
+    const topProtocols = [...protocolCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([protocol, count]) => ({ protocol, count }));
     
     return c.json({
       totalAgents: agentCount?.count || 0,
@@ -274,6 +388,9 @@ app.get("/stats", async (c) => {
       agentsWithMCP: withMCPCount?.count || 0,
       agentsWithA2A: withA2ACount?.count || 0,
       agentsWithX402: withX402Count?.count || 0,
+      chainBreakdown,
+      topTags,
+      topProtocols,
     });
   } catch (error) {
     return c.json({ error: "Failed to fetch stats" }, 500);
@@ -290,6 +407,9 @@ app.get("/search", async (c) => {
   const hasA2A = c.req.query("a2a") === "true";
   const hasX402 = c.req.query("x402") === "true";
   const hasMetadata = c.req.query("metadata") === "true";
+  const chain = c.req.query("chain")?.trim();
+  const tag = c.req.query("tag")?.trim();
+  const protocol = c.req.query("protocol")?.trim();
   
   try {
     let orderBy;
@@ -325,6 +445,15 @@ app.get("/search", async (c) => {
     if (hasA2A) conditions.push(sql`${schema.agent.hasA2A} = true`);
     if (hasX402) conditions.push(sql`${schema.agent.x402Support} = true`);
     if (hasMetadata) conditions.push(sql`${schema.agent.name} IS NOT NULL`);
+    if (chain) conditions.push(sql`LOWER(${schema.agent.chain}) = ${chain.toLowerCase()}`);
+    if (tag) {
+      const tagPattern = `%\"${tag.toLowerCase()}\"%`;
+      conditions.push(sql`LOWER(${schema.agent.tags}) LIKE ${tagPattern}`);
+    }
+    if (protocol) {
+      const protocolPattern = `%\"${protocol.toLowerCase()}\"%`;
+      conditions.push(sql`LOWER(${schema.agent.protocols}) LIKE ${protocolPattern}`);
+    }
     
     let agents;
     if (conditions.length > 0) {
@@ -389,6 +518,10 @@ app.get("/agents/:id", async (c) => {
         name: s.serviceName,
         endpoint: s.endpoint,
         version: s.version,
+        description: s.description,
+        capabilities: parseJsonArray(s.capabilities),
+        tools: parseJsonArray(s.tools),
+        skills: parseJsonArray(s.skills),
       })),
       metadata: metadata.reduce((acc, m) => {
         acc[m.metadataKey] = m.metadataValue;
@@ -508,13 +641,21 @@ app.post("/enrichment/run", async (c) => {
             name: metadata.name || null,
             description: metadata.description || null,
             image: metadata.image || null,
+            externalUrl: metadata.externalUrl || null,
             active: metadata.active ?? null,
             x402Support: metadata.x402Support ?? false,
+            tags: metadata.tags ? JSON.stringify(metadata.tags) : null,
+            protocols: metadata.protocols ? JSON.stringify(metadata.protocols) : null,
+            chain: metadata.chain || null,
+            chainId: metadata.chainId ?? null,
+            supportedTrust: metadata.supportedTrust ? JSON.stringify(metadata.supportedTrust) : null,
+            mcpCapabilities: metadata.mcpCapabilities ? JSON.stringify(metadata.mcpCapabilities) : null,
             hasMCP: metadata.hasMCP ?? false,
             hasA2A: metadata.hasA2A ?? false,
             mcpTools: metadata.mcpTools ? JSON.stringify(metadata.mcpTools) : null,
             a2aSkills: metadata.a2aSkills ? JSON.stringify(metadata.a2aSkills) : null,
             metadataFetchedAt: now,
+            metadataUpdatedAt: metadata.metadataUpdatedAt ?? null,
             metadataError: null,
           });
         results.success++;
@@ -585,6 +726,17 @@ app.use("/graphql", graphql({ db, schema }));
 // HELPERS
 // ============================================
 
+function parseJsonArray(value: string | null): string[] | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.filter((item) => typeof item === "string");
+  } catch {
+    return null;
+  }
+}
+
 function formatAgent(agent: typeof schema.agent.$inferSelect) {
   return {
     id: agent.id.toString(),
@@ -594,17 +746,25 @@ function formatAgent(agent: typeof schema.agent.$inferSelect) {
     name: agent.name,
     description: agent.description,
     image: agent.image,
+    externalUrl: agent.externalUrl,
     active: agent.active,
     x402Support: agent.x402Support,
+    tags: parseJsonArray(agent.tags),
+    protocols: parseJsonArray(agent.protocols),
+    chain: agent.chain,
+    chainId: agent.chainId,
+    supportedTrust: parseJsonArray(agent.supportedTrust),
+    mcpCapabilities: parseJsonArray(agent.mcpCapabilities),
     hasMCP: agent.hasMCP,
     hasA2A: agent.hasA2A,
-    mcpTools: agent.mcpTools ? JSON.parse(agent.mcpTools) : null,
-    a2aSkills: agent.a2aSkills ? JSON.parse(agent.a2aSkills) : null,
+    mcpTools: parseJsonArray(agent.mcpTools),
+    a2aSkills: parseJsonArray(agent.a2aSkills),
     feedbackCount: agent.feedbackCount,
     avgRating: agent.avgRating,
     registeredAt: agent.registeredAt.toString(),
     registeredBlock: agent.registeredBlock.toString(),
     metadataFetched: agent.metadataFetchedAt != null,
+    metadataUpdatedAt: agent.metadataUpdatedAt ? agent.metadataUpdatedAt.toString() : null,
   };
 }
 

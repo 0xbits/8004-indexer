@@ -17,8 +17,15 @@ export const agent = onchainTable("agent", (t) => ({
   name: t.text(),
   description: t.text(),
   image: t.text(),
+  externalUrl: t.text(),
   active: t.boolean(),
   x402Support: t.boolean(),
+  tags: t.text(), // JSON array as text
+  protocols: t.text(), // JSON array as text
+  chain: t.text(),
+  chainId: t.integer(),
+  supportedTrust: t.text(), // JSON array as text
+  mcpCapabilities: t.text(), // JSON array as text
   // Aggregated from services
   hasMCP: t.boolean(),
   hasA2A: t.boolean(),
@@ -29,6 +36,7 @@ export const agent = onchainTable("agent", (t) => ({
   avgRating: t.real(),
   // Enrichment tracking
   metadataFetchedAt: t.bigint(),
+  metadataUpdatedAt: t.bigint(),
   metadataError: t.text(),
 }));
 
@@ -60,6 +68,10 @@ export const agentService = onchainTable(
     serviceName: t.text().notNull(),
     endpoint: t.text().notNull(),
     version: t.text(),
+    description: t.text(),
+    capabilities: t.text(), // JSON array as text
+    tools: t.text(), // JSON array as text
+    skills: t.text(), // JSON array as text
   }),
   (table) => ({
     pk: primaryKey({ columns: [table.agentId, table.serviceName] }),
