@@ -3,7 +3,7 @@ import schema from "ponder:schema";
 import { graphql } from "ponder";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { swaggerUI } from "@hono/swagger-ui";
+import { apiReference } from "@scalar/hono-api-reference";
 import { eq, desc, like, or, sql, count, inArray } from "ponder";
 
 // ============================================
@@ -305,7 +305,20 @@ const openApiSpec = {
 app.get("/openapi.json", (c) => c.json(openApiSpec));
 
 // Swagger UI
-app.get("/docs", swaggerUI({ url: "/openapi.json" }));
+app.get(
+  "/docs",
+  apiReference({
+    spec: { url: "/openapi.json" },
+    pageTitle: "ERC-8004 Agents API",
+    theme: "kepler",
+    layout: "modern",
+    defaultHttpClient: {
+      targetKey: "javascript",
+      clientKey: "fetch",
+    },
+    hideModels: true,
+  })
+);
 
 // ============================================
 // REST ENDPOINTS
