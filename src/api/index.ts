@@ -4,7 +4,7 @@ import { graphql } from "ponder";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { swaggerUI } from "@hono/swagger-ui";
-import { eq, desc, like, or, sql, count } from "ponder";
+import { eq, desc, like, or, sql, count, inArray } from "ponder";
 
 // ============================================
 // METADATA FETCHING (inline for API use)
@@ -473,12 +473,37 @@ app.get("/search", async (c) => {
         .offset(offset);
     }
     
+    // Batch fetch service summaries for all returned agents
+    const agentIds = agents.map(a => a.id);
+    let servicesByAgent = new Map<string, string[]>();
+    
+    if (agentIds.length > 0) {
+      const services = await db
+        .select({
+          agentId: schema.agentService.agentId,
+          serviceName: schema.agentService.serviceName,
+        })
+        .from(schema.agentService)
+        .where(inArray(schema.agentService.agentId, agentIds));
+      
+      // Group by agent
+      for (const s of services) {
+        const key = s.agentId.toString();
+        if (!servicesByAgent.has(key)) servicesByAgent.set(key, []);
+        servicesByAgent.get(key)!.push(s.serviceName);
+      }
+    }
+    
     return c.json({
       query,
       count: agents.length,
       offset,
       limit,
-      results: agents.map(formatAgent),
+      results: agents.map(agent => ({
+        ...formatAgent(agent),
+        serviceTypes: servicesByAgent.get(agent.id.toString()) || [],
+        serviceCount: (servicesByAgent.get(agent.id.toString()) || []).length,
+      })),
     });
   } catch (error) {
     console.error("Search error:", error);
