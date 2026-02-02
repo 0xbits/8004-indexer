@@ -79,6 +79,26 @@ export const agentService = onchainTable(
 );
 
 // ============================================
+// AGENT HEALTH - Periodic health checks
+// ============================================
+
+export const agentHealth = onchainTable("agent_health", (t) => ({
+  id: t.bigint().primaryKey(), // agent ID
+  status: t.text(), // healthy | degraded | down | unknown
+  httpStatus: t.integer(),
+  latencyMs: t.integer(),
+  mcpValid: t.boolean(),
+  a2aValid: t.boolean(),
+  x402Price: t.text(),
+  toolCount: t.integer(),
+  lastChecked: t.bigint(),
+  lastHealthy: t.bigint(),
+  checkCount: t.integer().notNull().default(0),
+  healthyCount: t.integer().notNull().default(0),
+  errorMessage: t.text(),
+}));
+
+// ============================================
 // REPUTATION REGISTRY - Feedback
 // ============================================
 

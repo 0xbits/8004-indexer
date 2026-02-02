@@ -256,6 +256,7 @@ const openApiSpec = {
           { name: "chain", in: "query", schema: { type: "string" }, description: "Filter by chain" },
           { name: "tag", in: "query", schema: { type: "string" }, description: "Filter by tag" },
           { name: "protocol", in: "query", schema: { type: "string" }, description: "Filter by protocol" },
+          { name: "status", in: "query", schema: { type: "string", enum: ["healthy", "degraded", "down", "unknown"] }, description: "Filter by health status" },
           { name: "limit", in: "query", schema: { type: "integer", default: 20 } },
           { name: "offset", in: "query", schema: { type: "integer", default: 0 } },
           { name: "sort", in: "query", schema: { type: "string", enum: ["rating", "feedback", "recent"] } },
@@ -286,6 +287,26 @@ const openApiSpec = {
         ],
         responses: {
           "200": { description: "Feedback list" },
+        },
+      },
+    },
+    "/agents/{id}/health": {
+      get: {
+        summary: "Get health status for an agent",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "Health status" },
+          "404": { description: "Agent not found" },
+        },
+      },
+    },
+    "/health/stats": {
+      get: {
+        summary: "Get health check statistics",
+        responses: {
+          "200": { description: "Health stats" },
         },
       },
     },
@@ -410,6 +431,7 @@ app.get("/search", async (c) => {
   const chain = c.req.query("chain")?.trim();
   const tag = c.req.query("tag")?.trim();
   const protocol = c.req.query("protocol")?.trim();
+  const status = c.req.query("status")?.trim().toLowerCase();
   
   try {
     let orderBy;
@@ -453,6 +475,13 @@ app.get("/search", async (c) => {
     if (protocol) {
       const protocolPattern = `%\"${protocol.toLowerCase()}\"%`;
       conditions.push(sql`LOWER(${schema.agent.protocols}) LIKE ${protocolPattern}`);
+    }
+    if (status && ["healthy", "degraded", "down", "unknown"].includes(status)) {
+      conditions.push(sql`${schema.agent.id} IN (
+        SELECT ${schema.agentHealth.id}
+        FROM ${schema.agentHealth}
+        WHERE ${schema.agentHealth.status} = ${status}
+      )`);
     }
     
     let agents;
@@ -553,6 +582,66 @@ app.get("/agents/:id/feedback", async (c) => {
     });
   } catch (error) {
     return c.json({ error: "Failed to fetch feedback" }, 500);
+  }
+});
+
+// Get agent health
+app.get("/agents/:id/health", async (c) => {
+  const id = c.req.param("id");
+  let agentId: bigint;
+  try {
+    agentId = BigInt(id);
+  } catch {
+    return c.json({ error: "Invalid agent id" }, 400);
+  }
+
+  try {
+    const [agent] = await db
+      .select({ id: schema.agent.id })
+      .from(schema.agent)
+      .where(eq(schema.agent.id, agentId));
+
+    if (!agent) {
+      return c.json({ error: "Agent not found" }, 404);
+    }
+
+    const [health] = await db
+      .select()
+      .from(schema.agentHealth)
+      .where(eq(schema.agentHealth.id, agentId));
+
+    return c.json(formatAgentHealth(agentId, health));
+  } catch (error) {
+    return c.json({ error: "Failed to fetch health" }, 500);
+  }
+});
+
+// Health stats
+app.get("/health/stats", async (c) => {
+  try {
+    const [stats] = await db
+      .select({
+        totalChecked: count(),
+        healthy: sql<number>`SUM(CASE WHEN ${schema.agentHealth.status} = 'healthy' THEN 1 ELSE 0 END)`,
+        degraded: sql<number>`SUM(CASE WHEN ${schema.agentHealth.status} = 'degraded' THEN 1 ELSE 0 END)`,
+        down: sql<number>`SUM(CASE WHEN ${schema.agentHealth.status} = 'down' THEN 1 ELSE 0 END)`,
+        unknown: sql<number>`SUM(CASE WHEN ${schema.agentHealth.status} = 'unknown' THEN 1 ELSE 0 END)`,
+        avgLatencyMs: sql<number>`AVG(${schema.agentHealth.latencyMs})`,
+        lastRun: sql<bigint>`MAX(${schema.agentHealth.lastChecked})`,
+      })
+      .from(schema.agentHealth);
+
+    return c.json({
+      totalChecked: stats?.totalChecked || 0,
+      healthy: stats?.healthy || 0,
+      degraded: stats?.degraded || 0,
+      down: stats?.down || 0,
+      unknown: stats?.unknown || 0,
+      avgLatencyMs: stats?.avgLatencyMs ? Math.round(stats.avgLatencyMs) : 0,
+      lastRun: stats?.lastRun ? toIsoTimestamp(stats.lastRun) : null,
+    });
+  } catch (error) {
+    return c.json({ error: "Failed to fetch health stats" }, 500);
   }
 });
 
@@ -755,6 +844,39 @@ function formatAgent(agent: typeof schema.agent.$inferSelect) {
     registeredBlock: agent.registeredBlock.toString(),
     metadataFetched: agent.metadataFetchedAt != null,
     metadataUpdatedAt: agent.metadataUpdatedAt ? agent.metadataUpdatedAt.toString() : null,
+  };
+}
+
+function toIsoTimestamp(value: bigint | number | null) {
+  if (value == null) return null;
+  const asNumber = typeof value === "bigint" ? Number(value) : value;
+  if (!Number.isFinite(asNumber) || asNumber <= 0) return null;
+  return new Date(asNumber * 1000).toISOString();
+}
+
+function formatAgentHealth(
+  agentId: bigint,
+  health: typeof schema.agentHealth.$inferSelect | undefined
+) {
+  const checkCount = health?.checkCount ?? 0;
+  const healthyCount = health?.healthyCount ?? 0;
+  const uptime = checkCount > 0 ? Math.round((healthyCount / checkCount) * 1000) / 10 : null;
+
+  return {
+    agentId: agentId.toString(),
+    status: health?.status || "unknown",
+    httpStatus: health?.httpStatus ?? null,
+    latencyMs: health?.latencyMs ?? null,
+    mcpValid: health?.mcpValid ?? null,
+    a2aValid: health?.a2aValid ?? null,
+    toolCount: health?.toolCount ?? null,
+    x402Price: health?.x402Price ?? null,
+    lastChecked: toIsoTimestamp(health?.lastChecked ?? null),
+    lastHealthy: toIsoTimestamp(health?.lastHealthy ?? null),
+    checkCount,
+    healthyCount,
+    uptime,
+    errorMessage: health?.errorMessage ?? null,
   };
 }
 
