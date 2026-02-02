@@ -6,6 +6,97 @@ import { cors } from "hono/cors";
 import { swaggerUI } from "@hono/swagger-ui";
 import { eq, desc, like, or, sql, count } from "ponder";
 
+// ============================================
+// METADATA FETCHING (inline for API use)
+// ============================================
+
+interface AgentMetadataResult {
+  name?: string;
+  description?: string;
+  image?: string;
+  active?: boolean;
+  x402Support?: boolean;
+  hasMCP?: boolean;
+  hasA2A?: boolean;
+  mcpTools?: string[];
+  a2aSkills?: string[];
+}
+
+const IPFS_GATEWAYS = [
+  "https://ipfs.io/ipfs/",
+  "https://cloudflare-ipfs.com/ipfs/",
+];
+
+async function fetchAndParseMetadata(uri: string): Promise<AgentMetadataResult | null> {
+  try {
+    let content: string;
+    
+    if (uri.startsWith("data:")) {
+      // Decode data URI
+      const match = uri.match(/^data:([^,;]+)?(;base64)?,(.*)$/);
+      if (!match) return null;
+      const [, , isBase64, data] = match;
+      content = isBase64 ? Buffer.from(data, "base64").toString("utf-8") : decodeURIComponent(data);
+    } else if (uri.startsWith("ipfs://")) {
+      // Fetch from IPFS gateway
+      const cid = uri.replace("ipfs://", "");
+      let fetched = false;
+      for (const gateway of IPFS_GATEWAYS) {
+        try {
+          const res = await fetch(`${gateway}${cid}`, { 
+            signal: AbortSignal.timeout(8000),
+            headers: { "Accept": "application/json" }
+          });
+          if (res.ok) {
+            content = await res.text();
+            fetched = true;
+            break;
+          }
+        } catch {}
+      }
+      if (!fetched) return null;
+    } else if (uri.startsWith("http")) {
+      // Fetch from HTTP
+      const res = await fetch(uri, { 
+        signal: AbortSignal.timeout(8000),
+        headers: { "Accept": "application/json", "User-Agent": "ERC8004-Indexer/1.0" }
+      });
+      if (!res.ok) return null;
+      content = await res.text();
+    } else {
+      return null;
+    }
+    
+    const data = JSON.parse(content!);
+    
+    // Extract service info
+    const services = Array.isArray(data.services) ? data.services : [];
+    const hasMCP = services.some((s: any) => s.name?.toLowerCase() === "mcp");
+    const hasA2A = services.some((s: any) => s.name?.toLowerCase() === "a2a");
+    
+    const mcpTools: string[] = [];
+    const a2aSkills: string[] = [];
+    for (const svc of services) {
+      if (Array.isArray(svc.mcpTools)) mcpTools.push(...svc.mcpTools);
+      if (Array.isArray(svc.a2aSkills)) a2aSkills.push(...svc.a2aSkills);
+    }
+    
+    return {
+      name: typeof data.name === "string" ? data.name : undefined,
+      description: typeof data.description === "string" ? data.description : undefined,
+      image: typeof data.image === "string" ? data.image : undefined,
+      active: typeof data.active === "boolean" ? data.active : undefined,
+      x402Support: data.x402Support === true || data.x402support === true,
+      hasMCP,
+      hasA2A,
+      mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
+      a2aSkills: a2aSkills.length > 0 ? a2aSkills : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 const app = new Hono();
 
 // ============================================
@@ -378,6 +469,76 @@ app.get("/top", async (c) => {
 // ============================================
 // ENRICHMENT STATUS
 // ============================================
+
+// Trigger enrichment for a batch of agents
+app.post("/enrichment/run", async (c) => {
+  const limit = Math.min(parseInt(c.req.query("limit") || "50"), 200);
+  const secret = c.req.header("X-Enrich-Secret");
+  
+  // Simple protection - can be improved
+  if (process.env.ENRICH_SECRET && secret !== process.env.ENRICH_SECRET) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+  
+  try {
+    // Get agents needing enrichment (have URI but no metadata fetched)
+    const agents = await db
+      .select({ id: schema.agent.id, uri: schema.agent.agentURI })
+      .from(schema.agent)
+      .where(sql`
+        ${schema.agent.agentURI} IS NOT NULL 
+        AND ${schema.agent.metadataFetchedAt} IS NULL
+      `)
+      .orderBy(desc(schema.agent.feedbackCount))
+      .limit(limit);
+    
+    const results = { processed: 0, success: 0, failed: 0, agents: [] as any[] };
+    
+    for (const agent of agents) {
+      if (!agent.uri) continue;
+      results.processed++;
+      
+      const metadata = await fetchAndParseMetadata(agent.uri);
+      const now = BigInt(Math.floor(Date.now() / 1000));
+      
+      if (metadata && (metadata.name || metadata.description)) {
+        await db
+          .update(schema.agent, { id: agent.id })
+          .set({
+            name: metadata.name || null,
+            description: metadata.description || null,
+            image: metadata.image || null,
+            active: metadata.active ?? null,
+            x402Support: metadata.x402Support ?? false,
+            hasMCP: metadata.hasMCP ?? false,
+            hasA2A: metadata.hasA2A ?? false,
+            mcpTools: metadata.mcpTools ? JSON.stringify(metadata.mcpTools) : null,
+            a2aSkills: metadata.a2aSkills ? JSON.stringify(metadata.a2aSkills) : null,
+            metadataFetchedAt: now,
+            metadataError: null,
+          });
+        results.success++;
+        results.agents.push({ id: agent.id.toString(), name: metadata.name, status: "ok" });
+      } else {
+        await db
+          .update(schema.agent, { id: agent.id })
+          .set({
+            metadataFetchedAt: now,
+            metadataError: "No valid metadata",
+          });
+        results.failed++;
+        results.agents.push({ id: agent.id.toString(), status: "no_metadata" });
+      }
+      
+      // Small delay to be nice
+      await new Promise(r => setTimeout(r, 50));
+    }
+    
+    return c.json(results);
+  } catch (error: any) {
+    return c.json({ error: error.message || "Enrichment failed" }, 500);
+  }
+});
 
 // Get enrichment status
 app.get("/enrichment/status", async (c) => {
