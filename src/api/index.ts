@@ -204,98 +204,42 @@ app.use("*", async (c, next) => {
 });
 
 // ============================================
-// API DOCUMENTATION
+// API DOCUMENTATION (minimal)
 // ============================================
 
 const openApiSpec = {
   openapi: "3.0.0",
   info: {
-    title: "ERC-8004 Agents API",
+    title: "Agents API",
     version: "1.0.0",
-    description: "API for discovering ERC-8004 Trustless Agents on Ethereum",
-    contact: {
-      name: "Bits",
-      url: "https://b1ts.dev",
-    },
   },
-  servers: [
-    { url: "https://api.agents.b1ts.dev", description: "Production" },
-    { url: "http://localhost:42069", description: "Development" },
-  ],
+  servers: [{ url: "https://agents-api.b1ts.dev" }],
   paths: {
-    "/stats": {
-      get: {
-        summary: "Get registry statistics",
-        responses: {
-          "200": {
-            description: "Registry stats",
-            content: {
-              "application/json": {
-                schema: {
-                  type: "object",
-                  properties: {
-                    totalAgents: { type: "integer" },
-                    totalFeedback: { type: "integer" },
-                    agentsWithURI: { type: "integer" },
-                    chainBreakdown: { type: "object" },
-                    topTags: { type: "array", items: { type: "object" } },
-                    topProtocols: { type: "array", items: { type: "object" } },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
     "/search": {
       get: {
         summary: "Search agents",
         parameters: [
-          { name: "q", in: "query", schema: { type: "string" }, description: "Search query" },
-          { name: "chain", in: "query", schema: { type: "string" }, description: "Filter by chain" },
-          { name: "tag", in: "query", schema: { type: "string" }, description: "Filter by tag" },
-          { name: "protocol", in: "query", schema: { type: "string" }, description: "Filter by protocol" },
-          { name: "limit", in: "query", schema: { type: "integer", default: 20 } },
-          { name: "offset", in: "query", schema: { type: "integer", default: 0 } },
-          { name: "sort", in: "query", schema: { type: "string", enum: ["rating", "feedback", "recent"] } },
+          { name: "q", in: "query", schema: { type: "string" } },
+          { name: "mcp", in: "query", schema: { type: "boolean" } },
+          { name: "a2a", in: "query", schema: { type: "boolean" } },
+          { name: "x402", in: "query", schema: { type: "boolean" } },
+          { name: "limit", in: "query", schema: { type: "integer" } },
+          { name: "offset", in: "query", schema: { type: "integer" } },
         ],
-        responses: {
-          "200": { description: "Search results" },
-        },
+        responses: { "200": { description: "Agents" } },
       },
     },
     "/agents/{id}": {
       get: {
-        summary: "Get agent by ID",
-        parameters: [
-          { name: "id", in: "path", required: true, schema: { type: "string" } },
-        ],
-        responses: {
-          "200": { description: "Agent details" },
-          "404": { description: "Agent not found" },
-        },
+        summary: "Get agent",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Agent" } },
       },
     },
-    "/agents/{id}/feedback": {
+    "/stats": {
       get: {
-        summary: "Get feedback for an agent",
-        parameters: [
-          { name: "id", in: "path", required: true, schema: { type: "string" } },
-          { name: "limit", in: "query", schema: { type: "integer", default: 20 } },
-        ],
-        responses: {
-          "200": { description: "Feedback list" },
-        },
-      },
-    },
-    "/graphql": {
-      post: {
-        summary: "GraphQL endpoint",
-        description: "Full GraphQL API for complex queries",
-        responses: {
-          "200": { description: "GraphQL response" },
-        },
+        summary: "Registry stats",
+        responses: { "200": { description: "Stats" } },
       },
     },
   },
@@ -309,14 +253,11 @@ app.get(
   "/docs",
   apiReference({
     spec: { url: "/openapi.json" },
-    pageTitle: "ERC-8004 Agents API",
+    pageTitle: "Agents API",
     theme: "kepler",
-    layout: "modern",
-    defaultHttpClient: {
-      targetKey: "javascript",
-      clientKey: "fetch",
-    },
-    hideModels: true,
+    layout: "classic",
+    hideDownloadButton: true,
+    hiddenClients: true,
   })
 );
 
@@ -595,159 +536,7 @@ app.get("/agents/:id/feedback", async (c) => {
 });
 
 // Top agents endpoint
-app.get("/top", async (c) => {
-  const limit = Math.min(parseInt(c.req.query("limit") || "10"), 50);
-  const by = c.req.query("by") || "feedback";
-  
-  try {
-    let orderBy;
-    switch (by) {
-      case "rating":
-        orderBy = desc(schema.agent.avgRating);
-        break;
-      case "feedback":
-      default:
-        orderBy = desc(schema.agent.feedbackCount);
-    }
-    
-    const agents = await db
-      .select()
-      .from(schema.agent)
-      .where(sql`${schema.agent.feedbackCount} > 0`)
-      .orderBy(orderBy)
-      .limit(limit);
-    
-    return c.json({
-      by,
-      count: agents.length,
-      agents: agents.map(formatAgent),
-    });
-  } catch (error) {
-    return c.json({ error: "Failed to fetch top agents" }, 500);
-  }
-});
-
-// ============================================
-// ENRICHMENT STATUS
-// ============================================
-
-// Trigger enrichment for a batch of agents
-app.post("/enrichment/run", async (c) => {
-  const limit = Math.min(parseInt(c.req.query("limit") || "50"), 200);
-  const secret = c.req.header("X-Enrich-Secret");
-  
-  // Simple protection - can be improved
-  if (process.env.ENRICH_SECRET && secret !== process.env.ENRICH_SECRET) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-  
-  try {
-    // Get agents needing enrichment (have URI but no metadata fetched)
-    const agents = await db
-      .select({ id: schema.agent.id, uri: schema.agent.agentURI })
-      .from(schema.agent)
-      .where(sql`
-        ${schema.agent.agentURI} IS NOT NULL 
-        AND ${schema.agent.metadataFetchedAt} IS NULL
-      `)
-      .orderBy(desc(schema.agent.feedbackCount))
-      .limit(limit);
-    
-    const results = { processed: 0, success: 0, failed: 0, agents: [] as any[] };
-    
-    for (const agent of agents) {
-      if (!agent.uri) continue;
-      results.processed++;
-      
-      const metadata = await fetchAndParseMetadata(agent.uri);
-      const now = BigInt(Math.floor(Date.now() / 1000));
-      
-      if (metadata && (metadata.name || metadata.description)) {
-        await db
-          .update(schema.agent, { id: agent.id })
-          .set({
-            name: metadata.name || null,
-            description: metadata.description || null,
-            image: metadata.image || null,
-            externalUrl: metadata.externalUrl || null,
-            active: metadata.active ?? null,
-            x402Support: metadata.x402Support ?? false,
-            tags: metadata.tags ? JSON.stringify(metadata.tags) : null,
-            protocols: metadata.protocols ? JSON.stringify(metadata.protocols) : null,
-            chain: metadata.chain || null,
-            chainId: metadata.chainId ?? null,
-            supportedTrust: metadata.supportedTrust ? JSON.stringify(metadata.supportedTrust) : null,
-            mcpCapabilities: metadata.mcpCapabilities ? JSON.stringify(metadata.mcpCapabilities) : null,
-            hasMCP: metadata.hasMCP ?? false,
-            hasA2A: metadata.hasA2A ?? false,
-            mcpTools: metadata.mcpTools ? JSON.stringify(metadata.mcpTools) : null,
-            a2aSkills: metadata.a2aSkills ? JSON.stringify(metadata.a2aSkills) : null,
-            metadataFetchedAt: now,
-            metadataUpdatedAt: metadata.metadataUpdatedAt ?? null,
-            metadataError: null,
-          });
-        results.success++;
-        results.agents.push({ id: agent.id.toString(), name: metadata.name, status: "ok" });
-      } else {
-        await db
-          .update(schema.agent, { id: agent.id })
-          .set({
-            metadataFetchedAt: now,
-            metadataError: "No valid metadata",
-          });
-        results.failed++;
-        results.agents.push({ id: agent.id.toString(), status: "no_metadata" });
-      }
-      
-      // Small delay to be nice
-      await new Promise(r => setTimeout(r, 50));
-    }
-    
-    return c.json(results);
-  } catch (error: any) {
-    return c.json({ error: error.message || "Enrichment failed" }, 500);
-  }
-});
-
-// Get enrichment status
-app.get("/enrichment/status", async (c) => {
-  try {
-    const [total] = await db
-      .select({ count: count() })
-      .from(schema.agent)
-      .where(sql`${schema.agent.agentURI} IS NOT NULL`);
-    
-    const [enriched] = await db
-      .select({ count: count() })
-      .from(schema.agent)
-      .where(sql`${schema.agent.metadataFetchedAt} IS NOT NULL`);
-    
-    const [withName] = await db
-      .select({ count: count() })
-      .from(schema.agent)
-      .where(sql`${schema.agent.name} IS NOT NULL`);
-    
-    const [failed] = await db
-      .select({ count: count() })
-      .from(schema.agent)
-      .where(sql`${schema.agent.metadataError} IS NOT NULL`);
-    
-    return c.json({
-      total: total?.count || 0,
-      enriched: enriched?.count || 0,
-      withName: withName?.count || 0,
-      failed: failed?.count || 0,
-      pending: (total?.count || 0) - (enriched?.count || 0),
-    });
-  } catch (error) {
-    return c.json({ error: "Failed to get enrichment status" }, 500);
-  }
-});
-
-// ============================================
-// GRAPHQL
-// ============================================
-
+// GraphQL (undocumented)
 app.use("/graphql", graphql({ db, schema }));
 
 // ============================================
