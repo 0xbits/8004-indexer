@@ -713,6 +713,182 @@ app.get("/wallets/:address", async (c) => {
 app.use("/graphql", graphql({ db, schema }));
 
 // ============================================
+// ENRICHMENT - IPFS COMMENT FETCHING
+// ============================================
+
+const ENRICHMENT_BATCH_SIZE = 25;
+const ENRICHMENT_DELAY_MS = 300;
+
+async function fetchFeedbackContent(uri: string): Promise<{ comment: string | null; error: string | null }> {
+  if (!uri) return { comment: null, error: null };
+
+  // Handle IPFS URIs
+  if (uri.startsWith("ipfs://")) {
+    const cid = uri.replace("ipfs://", "");
+    const gateways = [
+      `https://ipfs.io/ipfs/${cid}`,
+      `https://cloudflare-ipfs.com/ipfs/${cid}`,
+      `https://gateway.pinata.cloud/ipfs/${cid}`,
+      `https://dweb.link/ipfs/${cid}`,
+    ];
+
+    for (const gateway of gateways) {
+      try {
+        const response = await fetch(gateway, { signal: AbortSignal.timeout(10000) });
+        if (response.ok) {
+          const json = await response.json();
+          return { comment: json.comment || json.message || json.text || null, error: null };
+        }
+      } catch {
+        continue;
+      }
+    }
+    return { comment: null, error: "ipfs_fetch_failed" };
+  }
+
+  // Handle HTTP/HTTPS URIs
+  if (uri.startsWith("http://") || uri.startsWith("https://")) {
+    try {
+      const response = await fetch(uri, {
+        signal: AbortSignal.timeout(10000),
+        headers: { "Accept": "application/json", "User-Agent": "ERC8004-Indexer/1.0" },
+      });
+      if (!response.ok) return { comment: null, error: `http_${response.status}` };
+      
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const json = await response.json();
+        return { comment: json.comment || json.message || json.text || null, error: null };
+      } else {
+        const text = await response.text();
+        return { comment: text.slice(0, 2000), error: null };
+      }
+    } catch (err) {
+      return { comment: null, error: `http_error` };
+    }
+  }
+
+  // Handle Arweave
+  if (uri.startsWith("ar://")) {
+    const txId = uri.replace("ar://", "");
+    try {
+      const response = await fetch(`https://arweave.net/${txId}`, { signal: AbortSignal.timeout(15000) });
+      if (!response.ok) return { comment: null, error: `arweave_${response.status}` };
+      const json = await response.json();
+      return { comment: json.comment || json.message || null, error: null };
+    } catch {
+      return { comment: null, error: "arweave_fetch_failed" };
+    }
+  }
+
+  return { comment: null, error: "unsupported_uri_scheme" };
+}
+
+// Trigger IPFS/URI enrichment for pending feedback
+app.post("/enrich/comments", async (c) => {
+  const limit = Math.min(parseInt(c.req.query("limit") || String(ENRICHMENT_BATCH_SIZE)), 100);
+  
+  try {
+    // Get feedback entries needing enrichment
+    const pending = await db
+      .select({
+        agentId: schema.feedback.agentId,
+        clientAddress: schema.feedback.clientAddress,
+        feedbackIndex: schema.feedback.feedbackIndex,
+        feedbackURI: schema.feedback.feedbackURI,
+      })
+      .from(schema.feedback)
+      .where(
+        sql`${schema.feedback.feedbackURI} IS NOT NULL 
+            AND ${schema.feedback.feedbackURI} != ''
+            AND ${schema.feedback.comment} IS NULL
+            AND (${schema.feedback.commentError} = 'ipfs_needs_fetch' 
+                 OR ${schema.feedback.commentError} IS NULL
+                 OR ${schema.feedback.commentFetchedAt} IS NULL)`
+      )
+      .limit(limit);
+
+    if (pending.length === 0) {
+      return c.json({ message: "No pending feedback to enrich", processed: 0 });
+    }
+
+    let success = 0;
+    let failed = 0;
+
+    for (const row of pending) {
+      if (!row.feedbackURI) continue;
+
+      const { comment, error } = await fetchFeedbackContent(row.feedbackURI);
+
+      await db
+        .update(schema.feedback, {
+          agentId: row.agentId,
+          clientAddress: row.clientAddress,
+          feedbackIndex: row.feedbackIndex,
+        })
+        .set({
+          comment: comment,
+          commentError: error,
+          commentFetchedAt: BigInt(Math.floor(Date.now() / 1000)),
+        });
+
+      if (comment) success++;
+      else failed++;
+
+      // Rate limiting
+      await new Promise(resolve => setTimeout(resolve, ENRICHMENT_DELAY_MS));
+    }
+
+    return c.json({
+      message: "Enrichment complete",
+      processed: pending.length,
+      success,
+      failed,
+    });
+  } catch (error) {
+    console.error("Enrichment error:", error);
+    return c.json({ error: "Enrichment failed" }, 500);
+  }
+});
+
+// Get enrichment status
+app.get("/enrich/status", async (c) => {
+  try {
+    const [totalPending] = await db
+      .select({ count: count() })
+      .from(schema.feedback)
+      .where(
+        sql`${schema.feedback.feedbackURI} IS NOT NULL 
+            AND ${schema.feedback.feedbackURI} != ''
+            AND ${schema.feedback.comment} IS NULL
+            AND (${schema.feedback.commentError} = 'ipfs_needs_fetch' 
+                 OR ${schema.feedback.commentError} IS NULL)`
+      );
+
+    const [totalWithComments] = await db
+      .select({ count: count() })
+      .from(schema.feedback)
+      .where(sql`${schema.feedback.comment} IS NOT NULL`);
+
+    const [totalWithErrors] = await db
+      .select({ count: count() })
+      .from(schema.feedback)
+      .where(
+        sql`${schema.feedback.commentError} IS NOT NULL 
+            AND ${schema.feedback.commentError} != 'ipfs_needs_fetch'`
+      );
+
+    return c.json({
+      pending: totalPending?.count || 0,
+      enriched: totalWithComments?.count || 0,
+      failed: totalWithErrors?.count || 0,
+    });
+  } catch (error) {
+    return c.json({ error: "Failed to get status" }, 500);
+  }
+});
+
+// ============================================
 // HELPERS
 // ============================================
 
