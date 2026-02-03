@@ -526,6 +526,7 @@ app.get("/agents/:id/feedback", async (c) => {
         tags: [f.tag1, f.tag2].filter(Boolean),
         endpoint: f.endpoint,
         feedbackURI: f.feedbackURI,
+        comment: f.comment,
         isRevoked: f.isRevoked,
         createdAt: f.createdAt.toString(),
       })),
@@ -535,7 +536,179 @@ app.get("/agents/:id/feedback", async (c) => {
   }
 });
 
-// Top agents endpoint
+// ============================================
+// GLOBAL FEEDBACK FEED
+// ============================================
+
+app.get("/feedback", async (c) => {
+  const limit = Math.min(parseInt(c.req.query("limit") || "50"), 100);
+  const offset = parseInt(c.req.query("offset") || "0");
+  const minRating = parseInt(c.req.query("minRating") || "0");
+  const wallet = c.req.query("wallet");
+  
+  try {
+    let query = db
+      .select({
+        agentId: schema.feedback.agentId,
+        agentName: schema.agent.name,
+        agentImage: schema.agent.image,
+        client: schema.feedback.clientAddress,
+        value: schema.feedback.value,
+        valueDecimals: schema.feedback.valueDecimals,
+        tag1: schema.feedback.tag1,
+        tag2: schema.feedback.tag2,
+        endpoint: schema.feedback.endpoint,
+        comment: schema.feedback.comment,
+        isRevoked: schema.feedback.isRevoked,
+        createdAt: schema.feedback.createdAt,
+      })
+      .from(schema.feedback)
+      .leftJoin(schema.agent, eq(schema.feedback.agentId, schema.agent.id))
+      .where(eq(schema.feedback.isRevoked, false))
+      .orderBy(desc(schema.feedback.createdAt))
+      .offset(offset)
+      .limit(limit);
+
+    const feedbackList = await query;
+    
+    // Get total count for pagination
+    const [totalCount] = await db
+      .select({ count: count() })
+      .from(schema.feedback)
+      .where(eq(schema.feedback.isRevoked, false));
+    
+    // Get unique users count
+    const [userCount] = await db
+      .select({ count: sql`COUNT(DISTINCT ${schema.feedback.clientAddress})` })
+      .from(schema.feedback)
+      .where(eq(schema.feedback.isRevoked, false));
+    
+    // Get last 24h count
+    const oneDayAgo = BigInt(Math.floor(Date.now() / 1000) - 86400);
+    const [last24hCount] = await db
+      .select({ count: count() })
+      .from(schema.feedback)
+      .where(sql`${schema.feedback.createdAt} > ${oneDayAgo} AND ${schema.feedback.isRevoked} = false`);
+    
+    // Calculate average rating
+    const feedbackWithRatings = feedbackList.filter(f => f.value && f.valueDecimals !== null);
+    const avgRating = feedbackWithRatings.length > 0
+      ? feedbackWithRatings.reduce((sum, f) => sum + Number(f.value) / Math.pow(10, f.valueDecimals || 0), 0) / feedbackWithRatings.length
+      : 0;
+
+    return c.json({
+      stats: {
+        total: totalCount?.count || 0,
+        avgRating: Math.round(avgRating * 10) / 10,
+        uniqueUsers: userCount?.count || 0,
+        last24h: last24hCount?.count || 0,
+      },
+      feedback: feedbackList.map((f) => ({
+        agentId: f.agentId.toString(),
+        agentName: f.agentName,
+        agentImage: f.agentImage,
+        client: f.client,
+        rating: f.value && f.valueDecimals !== null 
+          ? Number(f.value) / Math.pow(10, f.valueDecimals) 
+          : null,
+        tags: [f.tag1, f.tag2].filter(Boolean),
+        endpoint: f.endpoint,
+        comment: f.comment,
+        createdAt: f.createdAt.toString(),
+      })),
+      pagination: {
+        offset,
+        limit,
+        hasMore: offset + limit < (totalCount?.count || 0),
+      },
+    });
+  } catch (error) {
+    console.error("Feedback feed error:", error);
+    return c.json({ error: "Failed to fetch feedback feed" }, 500);
+  }
+});
+
+// ============================================
+// WALLET PROFILE
+// ============================================
+
+app.get("/wallets/:address", async (c) => {
+  const address = c.req.param("address").toLowerCase() as `0x${string}`;
+  
+  try {
+    // Get agents owned by this wallet
+    const ownedAgents = await db
+      .select({
+        id: schema.agent.id,
+        name: schema.agent.name,
+        image: schema.agent.image,
+        feedbackCount: schema.agent.feedbackCount,
+        avgRating: schema.agent.avgRating,
+      })
+      .from(schema.agent)
+      .where(eq(schema.agent.owner, address))
+      .orderBy(desc(schema.agent.feedbackCount))
+      .limit(50);
+    
+    // Get agents this wallet has given feedback to
+    const feedbackGiven = await db
+      .select({
+        agentId: schema.feedback.agentId,
+        agentName: schema.agent.name,
+        agentImage: schema.agent.image,
+        rating: schema.feedback.value,
+        valueDecimals: schema.feedback.valueDecimals,
+        comment: schema.feedback.comment,
+        createdAt: schema.feedback.createdAt,
+      })
+      .from(schema.feedback)
+      .leftJoin(schema.agent, eq(schema.feedback.agentId, schema.agent.id))
+      .where(eq(schema.feedback.clientAddress, address))
+      .orderBy(desc(schema.feedback.createdAt))
+      .limit(50);
+    
+    // Identify "endorsed" agents (rating >= 70)
+    const endorsed = feedbackGiven
+      .filter(f => {
+        const rating = Number(f.rating) / Math.pow(10, f.valueDecimals || 0);
+        return rating >= 70;
+      })
+      .map(f => ({
+        agentId: f.agentId.toString(),
+        agentName: f.agentName,
+        agentImage: f.agentImage,
+        rating: Number(f.rating) / Math.pow(10, f.valueDecimals || 0),
+      }));
+
+    return c.json({
+      address,
+      owned: ownedAgents.map(a => ({
+        id: a.id.toString(),
+        name: a.name,
+        image: a.image,
+        feedbackCount: a.feedbackCount,
+        avgRating: a.avgRating,
+      })),
+      endorsed: [...new Map(endorsed.map(e => [e.agentId, e])).values()],
+      feedbackGiven: feedbackGiven.map(f => ({
+        agentId: f.agentId.toString(),
+        agentName: f.agentName,
+        rating: Number(f.rating) / Math.pow(10, f.valueDecimals || 0),
+        comment: f.comment,
+        createdAt: f.createdAt.toString(),
+      })),
+      stats: {
+        agentsOwned: ownedAgents.length,
+        feedbackGiven: feedbackGiven.length,
+        agentsEndorsed: endorsed.length,
+      },
+    });
+  } catch (error) {
+    console.error("Wallet profile error:", error);
+    return c.json({ error: "Failed to fetch wallet profile" }, 500);
+  }
+});
+
 // GraphQL (undocumented)
 app.use("/graphql", graphql({ db, schema }));
 

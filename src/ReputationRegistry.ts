@@ -1,5 +1,6 @@
 import { ponder } from "ponder:registry";
 import { agent, feedback } from "ponder:schema";
+import { parseFeedbackUri } from "./utils/feedbackUri";
 
 // ============================================
 // REPUTATION REGISTRY INDEXING
@@ -22,6 +23,9 @@ ponder.on("ReputationRegistry:NewFeedback", async ({ event, context }) => {
     feedbackHash,
   } = event.args;
   
+  // Extract comment from feedbackURI
+  const { comment, error: commentError } = parseFeedbackUri(feedbackURI);
+  
   // Insert the feedback record
   await context.db.insert(feedback).values({
     agentId: agentId,
@@ -36,6 +40,9 @@ ponder.on("ReputationRegistry:NewFeedback", async ({ event, context }) => {
     feedbackHash: feedbackHash === "0x0000000000000000000000000000000000000000000000000000000000000000" 
       ? null 
       : feedbackHash,
+    comment: comment,
+    commentFetchedAt: comment ? event.block.timestamp : null,
+    commentError: commentError,
     isRevoked: false,
     createdAt: event.block.timestamp,
     createdBlock: event.block.number,

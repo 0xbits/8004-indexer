@@ -95,6 +95,10 @@ export const feedback = onchainTable(
     endpoint: t.text(),
     feedbackURI: t.text(),
     feedbackHash: t.hex(),
+    // Extracted from feedbackURI
+    comment: t.text(),
+    commentFetchedAt: t.bigint(),
+    commentError: t.text(),
     isRevoked: t.boolean().notNull().default(false),
     createdAt: t.bigint().notNull(),
     createdBlock: t.bigint().notNull(),
